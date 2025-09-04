@@ -8,18 +8,17 @@ import {
   onSnapshot,
   doc,
   deleteDoc,
-  serverTimestamp
+  where,
+  getDocs,
+  writeBatch
 } from "firebase/firestore";
 
-// Chatbot mejorado: typing indicator, delay humano, modo oscuro, speech-to-text,
-// almacenamiento de contexto en localStorage, linkify seguro y animaciones suaves.
-
-export default function ChatbotEnhanced() {
-  const [messages, setMessages] = useState([]); // {id, text, sender, timestamp, typing}
+// Chatbot mejorado con técnicas específicas de apoyo emocional
+export default function EmotionalSupportChatbot() {
+  const [messages, setMessages] = useState([]);
   const [input, setInput] = useState("");
   const [minimized, setMinimized] = useState(false);
-  const [showOptions, setShowOptions] = useState(false);
-  const [typing, setTyping] = useState(false);
+  const [showOptions, setShowOptions] = useState(true);
   const [dark, setDark] = useState(() => {
     try {
       return JSON.parse(localStorage.getItem("chat_dark_mode")) || false;
@@ -31,10 +30,18 @@ export default function ChatbotEnhanced() {
   const recognitionRef = useRef(null);
   const bottomRef = useRef(null);
   const typingDocRef = useRef(null);
-  const sessionContextKey = "chat_session_context_v1"; // para recordar estado breve
+  const sessionIdRef = useRef(Date.now().toString());
+  const sessionContextKey = `emotional_chat_context_${sessionIdRef.current}`;
+
+  // Obtener saludo según la hora del día
+  const getTimeBasedGreeting = () => {
+    const hour = new Date().getHours();
+    if (hour < 12) return "Hola buenos días, ¿cómo te sientes?";
+    if (hour < 19) return "Hola buenas tardes, ¿cómo te sientes?";
+    return "Hola buenas noches, ¿cómo te sientes?";
+  };
 
   // ---------- Utilidades ----------
-  // Escapa HTML y convierte URLs a enlaces seguros
   const escapeHtml = (unsafe) => {
     return unsafe
       .replace(/&/g, "&amp;")
@@ -46,11 +53,9 @@ export default function ChatbotEnhanced() {
 
   const linkify = (text) => {
     if (!text) return "";
-    // Primero escapamos HTML
     const safe = escapeHtml(text);
-    // Luego convertimos URLs (http/https) a enlaces
-    return safe.replace(/(https?:\/\/[\w\-._~:\/?#\[\]@!$&'()*+,;=%]+)/g, (url) => {
-      // permitir solo URLs http(s)
+    // Corregido: eliminados escapes innecesarios
+    return safe.replace(/(https?:\/\/[\w\-._~:/?#[\]@!$&'()*+,;=%]+)/g, (url) => {
       return `<a href="${url}" target="_blank" rel="noopener noreferrer" style="color:inherit;text-decoration:underline;">${url}</a>`;
     });
   };
@@ -69,19 +74,61 @@ export default function ChatbotEnhanced() {
     }
   };
 
+  // Limpiar datos de sesión al cerrar/recargar
+  useEffect(() => {
+    const cleanupSession = () => {
+      try {
+        localStorage.removeItem(sessionContextKey);
+        
+        // Eliminar mensajes de esta sesión de Firestore
+        const deleteSessionMessages = async () => {
+          try {
+            const q = query(
+              collection(db, "messages"), 
+              where("sessionId", "==", sessionIdRef.current)
+            );
+            const querySnapshot = await getDocs(q);
+            const batch = writeBatch(db);
+            
+            querySnapshot.forEach((doc) => {
+              batch.delete(doc.ref);
+            });
+            
+            await batch.commit();
+          } catch (error) {
+            console.error("Error deleting session messages:", error);
+          }
+        };
+        
+        deleteSessionMessages();
+      } catch (e) { /* ignore */ }
+    };
+
+    window.addEventListener('beforeunload', cleanupSession);
+    return () => {
+      window.removeEventListener('beforeunload', cleanupSession);
+      cleanupSession();
+    };
+  }, [sessionContextKey]); // Añadida dependencia sessionContextKey
+
   // ---------- Firestore: escucha en tiempo real ----------
   useEffect(() => {
     const q = query(collection(db, "messages"), orderBy("timestamp", "asc"));
     const unsubscribe = onSnapshot(q, (snapshot) => {
-      const msgs = snapshot.docs.map(d => ({ id: d.id, ...d.data() }));
+      const msgs = snapshot.docs.map((d) => ({ id: d.id, ...d.data() }));
       setMessages(msgs);
 
-      // Si no hay mensajes, insertar saludo inicial (solo la primera vez de la colección vacía)
-      if (msgs.length === 0) {
+      // Solo enviar saludo inicial si no hay mensajes en esta sesión
+      const sessionMsgs = msgs.filter(msg => msg.sessionId === sessionIdRef.current);
+      if (sessionMsgs.length === 0) {
         addDoc(collection(db, "messages"), {
-          text: "¡Hola! Soy Apoyo Emocional ITSMIGRA — tu asistente confidencial para primeros auxilios emocionales. ¿Cómo te sientes hoy? (Ej: estrés, ansiedad, tristeza)",
+          text: getTimeBasedGreeting(),
           sender: "bot",
-          timestamp: Date.now()
+          timestamp: Date.now(),
+          sessionId: sessionIdRef.current,
+          meta: {
+            options: ["Ansiedad", "Estrés", "Depresión", "Crisis", "Agendar cita"],
+          },
         });
       }
     });
@@ -94,16 +141,18 @@ export default function ChatbotEnhanced() {
     bottomRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [messages]);
 
-  // Guardar modo oscuro en localStorage
+  // Guardar modo oscuro
   useEffect(() => {
-    try { localStorage.setItem("chat_dark_mode", JSON.stringify(dark)); } catch (e) {}
+    try {
+      localStorage.setItem("chat_dark_mode", JSON.stringify(dark));
+    } catch (e) {}
   }, [dark]);
 
-  // ---------- Speech-to-Text (Web Speech API) ----------
+  // ---------- Speech-to-Text ----------
   useEffect(() => {
     if (typeof window === "undefined") return;
     const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
-    if (!SpeechRecognition) return; // no soportado
+    if (!SpeechRecognition) return;
 
     const rec = new SpeechRecognition();
     rec.lang = "es-MX";
@@ -112,7 +161,7 @@ export default function ChatbotEnhanced() {
 
     rec.onresult = (event) => {
       const transcript = event.results[0][0].transcript;
-      setInput(prev => (prev ? `${prev} ${transcript}` : transcript));
+      setInput((prev) => (prev ? `${prev} ${transcript}` : transcript));
     };
 
     rec.onend = () => setListening(false);
@@ -138,140 +187,171 @@ export default function ChatbotEnhanced() {
     }
   };
 
-  // ---------- Lógica de respuesta del bot (mejorada) ----------
-  const getBotResponse = async (userMessage) => {
-    // Guardar parte del contexto simple
-    const ctx = loadContext();
-    ctx.lastMessage = userMessage.slice(0, 200);
-    saveContext(ctx);
-
-    const lowerMsg = userMessage.toLowerCase();
-
-    // Reglas mejoradas: sin dependencias externas, sencillo y explícito
-    if (/(estr[eé]s|estres)/i.test(lowerMsg) || /(^|\s)1(\s|$)/.test(lowerMsg)) {
-      return {
-        text: "📌 Técnica rápida para el estrés: respira 4s — retén 4s — exhala 6s. Haz 4 ciclos. ¿Quieres que te muestre un plan para priorizar tareas?",
-        options: ["Plan de prioridades", "Ejercicios respiratorios", "Hablar con un profesional"]
-      };
-    }
-
-    if (/ansiedad|pánico|panico|nervios/i.test(lowerMsg) || /(^|\s)2(\s|$)/.test(lowerMsg)) {
-      return {
-        text: "🌿 Grounding rápido: nombra 5 cosas que ves, 4 que puedes tocar, 3 que oyes, 2 que hueles, 1 que saboreas. Si esto es frecuente, podemos agendar una cita.",
-        options: ["Grounding guiado", "Agendar cita", "Recursos de emergencia"]
-      };
-    }
-
-    if (/triste|depresi[oó]n|depresion|melanc/i.test(lowerMsg) || /(^|\s)3(\s|$)/.test(lowerMsg)) {
-      return {
-        text: "💙 Sentirse triste es válido. Pequeños pasos: caminar 10 min, escribir 3 cosas buenas del día, hablar con alguien. ¿Quieres ideas para journaling?",
-        options: ["Ejercicios de ánimo", "Journaling", "Hablar ahora"]
-      };
-    }
-
-    if (/cita|agenda|agendar|reservar/i.test(lowerMsg) || /(^|\s)4(\s|$)/.test(lowerMsg)) {
-      return {
-        text: "Puedes agendar con nuestra psicóloga aquí: https://tu-centro.example/agenda — si te parece, puedo guiarte en el proceso.",
-        options: []
-      };
-    }
-
-    if (/suicid|morir|no quiero vivir|me quiero morir/i.test(lowerMsg)) {
-      return {
-        text: "Si estás en peligro inmediato, llama al 911. En México también puedes marcar la Línea de la Vida: 800 911 2000. ¿Quieres que busque contactos de emergencia o abrir recursos?",
-        options: ["Contactos de emergencia", "Abrir recursos"],
-        emergency: true
-      };
-    }
-
-    if (/gracias|bye|ad[ií]os|nos vemos/i.test(lowerMsg)) {
-      return { text: "Gracias por contarme. Estoy aquí cuando me necesites. Cuídate ❤️", options: [] };
-    }
-
-    // Respuesta por defecto con validación emocional y seguimiento sugerido
+  // ---------- Técnicas específicas de apoyo emocional ----------
+  const getAnxietyTechniques = () => {
     return {
-      text: `Entiendo — eso suena difícil. ¿Quieres contarme qué desencadenó esto o prefieres que te proponga técnicas rápidas para calmarte?`,
-      options: ["Contarte mi desencadenante", "Técnicas rápidas"]
+      text: `😌 Veo que estás experimentando ansiedad. Te recomiendo la técnica de respiración diafragmática que ayuda a activar el sistema nervioso parasimpático:
+
+1. Siéntate con la espalda recta y hombros relajados
+2. Coloca una mano en el abdomen
+3. Inhala despacio por la nariz (3-5 segundos) notando cómo el abdomen se infla
+4. Mantén el aire unos segundos repitiendo mentalmente "estoy tranquilo/a"
+5. Exhala lentamente por la boca (3-5 segundos) liberando el aire completamente
+
+Repite este ciclo 4-5 veces. ¿Te gustaría que te guíe en una sesión de respiración o prefieres conocer otras técnicas?`,
+      options: ["Guíame en respiración", "Otras técnicas", "Agendar cita"],
     };
   };
 
-  // ---------- Envío de mensaje con typing indicator y delay humano ----------
+  const getStressTechniques = () => {
+    return {
+      text: `📚 Identifico que estás pasando por estrés. La gestión del tiempo y hábitos de autocuidado son clave:
+
+• Planifica tus tareas priorizando las importantes
+• Respeta horarios regulares de sueño y alimentación
+• Realiza actividad física moderada diaria (caminar 30 min, yoga)
+• Practica técnicas de relajación y respiración profunda
+
+¿Quieres que te ayude con un plan de organización o técnicas de relajación?`,
+      options: ["Plan de organización", "Técnicas de relajación", "Ejercicios rápidos"],
+    };
+  };
+
+  const getDepressionTechniques = () => {
+    return {
+      text: `💙 Lamento que estés experimentando esto. Para manejar la depresión, la OMS recomienda:
+
+1. Actividades placenteras: Planifica actividades que solían gustarte
+2. Contacto social: Habla con amigos/familiares de confianza
+3. Hábitos saludables: Ejercicio frecuente, alimentación balanceada, sueño regular
+4. Buscar ayuda profesional si los síntomas persisten
+
+¿Quieres ideas para actividades, contacto social o información sobre ayuda profesional?`,
+      options: ["Ideas de actividades", "Contacto social", "Ayuda profesional"],
+    };
+  };
+
+  const getCrisisTechniques = () => {
+    return {
+      text: `🆘 Lo que describes suena serio. No estás solo/a. Por favor contacta:
+
+• Línea de la Vida (México): 800 911 2000
+• Emergencias: 911
+• Servicios de crisis de tu universidad
+
+Mientras llega ayuda, si estás experimentando un ataque de pánico:
+1. Busca un lugar tranquilo
+2. Siéntate y aplica respiración controlada
+3. Inhala despacio (3-5 seg), mantén 1-2 seg, exhala (3-5 seg)
+4. Repite varias veces
+
+¿Necesitas que te contactemos con alguien o prefieres que te guíe en respiración?`,
+      options: ["Contactar emergencia", "Guíame en respiración", "Líneas de ayuda"],
+      emergency: true,
+    };
+  };
+
+  // ---------- Análisis de emociones y respuestas ----------
+  const analyzeEmotion = (message) => {
+    const lowerMsg = message.toLowerCase();
+    if (/suicid|morir|no quiero vivir|me quiero morir|autolesi|herirme/i.test(lowerMsg)) {
+      return "crisis";
+    }
+    if (/ansiedad|pánico|panico|nervios|preocupad|angustia/i.test(lowerMsg)) {
+      return "ansiedad";
+    }
+    if (/estr[eé]s|estres|presión|presion|agobio/i.test(lowerMsg)) {
+      return "estrés";
+    }
+    if (/triste|depresi[oó]n|deprimid|melanc|solo|sola/i.test(lowerMsg)) {
+      return "depresión";
+    }
+    return "otro";
+  };
+
+  const getBotResponse = async (userMessage) => {
+    const ctx = loadContext();
+    ctx.lastMessage = userMessage.slice(0, 200);
+    ctx.lastEmotion = analyzeEmotion(userMessage);
+    saveContext(ctx);
+
+    const emotion = ctx.lastEmotion;
+
+    switch (emotion) {
+      case "crisis":
+        return getCrisisTechniques();
+      case "ansiedad":
+        return getAnxietyTechniques();
+      case "estrés":
+        return getStressTechniques();
+      case "depresión":
+        return getDepressionTechniques();
+      default:
+        return {
+          text: "Gracias por compartir cómo te sientes. 😊 ¿Quieres contarme más o prefieres que te sugiera algunas técnicas para sentirte mejor?",
+          options: ["Contar más", "Técnicas de relajación", "Agendar cita"],
+        };
+    }
+  };
+
+  // ---------- Envío de mensaje ----------
   const sendMessage = async (messageToSend = null) => {
-    const textToSend = (messageToSend !== null) ? messageToSend : input;
+    const textToSend = messageToSend !== null ? messageToSend : input;
     if (!textToSend || !textToSend.trim()) return;
 
-    // Optimistic UI: guardar mensaje del usuario inmediatamente
     await addDoc(collection(db, "messages"), {
       text: textToSend,
       sender: "user",
-      timestamp: Date.now()
+      timestamp: Date.now(),
+      sessionId: sessionIdRef.current,
     });
 
     setInput("");
     setShowOptions(false);
 
-    // Agregar indicador de "escribiendo" como documento para otros clientes
     const typingDoc = await addDoc(collection(db, "messages"), {
       text: "Escribiendo...",
       sender: "bot",
       typing: true,
-      timestamp: Date.now()
+      timestamp: Date.now(),
+      sessionId: sessionIdRef.current,
     });
     typingDocRef.current = typingDoc;
-    setTyping(true);
 
-    // Obtener la respuesta (puede contener opciones)
     let botResponse;
     try {
       botResponse = await getBotResponse(textToSend);
     } catch (e) {
-      botResponse = { text: "Perdón, hubo un error. ¿Puedes intentar de nuevo?", options: [] };
+      botResponse = { text: "Lo siento, hubo un error. ¿Puedes intentar de nuevo?", options: [] };
     }
 
-    // Simular tiempo de respuesta humano (aleatorio entre 800ms y 1500ms + longitud)
     const baseDelay = 800 + Math.min(1200, botResponse.text.length * 8);
     const jitter = Math.floor(Math.random() * 400);
     const delay = baseDelay + jitter;
 
     setTimeout(async () => {
-      // Borrar el doc de typing (si existe)
       try {
         await deleteDoc(doc(db, "messages", typingDoc.id));
-      } catch (e) {
-        // Si no se pudo borrar, no bloqueamos la respuesta
-      }
+      } catch (e) {}
 
-      // Guardar la respuesta real
       await addDoc(collection(db, "messages"), {
         text: botResponse.text,
         sender: "bot",
         timestamp: Date.now(),
+        sessionId: sessionIdRef.current,
         meta: {
           options: botResponse.options || [],
-          emergency: botResponse.emergency || false
-        }
+          emergency: botResponse.emergency || false,
+        },
       });
 
-      setTyping(false);
       setShowOptions((botResponse.options || []).length > 0);
-
     }, delay);
   };
 
-  // Manejar click en opciones rápidas
-  const handleOptionClick = (index) => {
-    // Mapear índices a textos (coincide con your options in render)
-    const map = ["Estrés académico", "Ansiedad", "Tristeza", "Agendar cita"];
-    const text = map[index] || (index + 1).toString();
-    setInput(text);
-    // Enviar inmediatamente
-    setTimeout(() => sendMessage(text), 150);
-  };
-
-  // Atajo: enviar botón quick option (por ejemplo desde la respuesta del bot)
-  const handleBotSuggestion = (suggestion) => {
-    setInput(suggestion);
-    setTimeout(() => sendMessage(suggestion), 150);
+  const handleOptionClick = (option) => {
+    setInput(option);
+    setTimeout(() => sendMessage(option), 150);
   };
 
   // ---------- Render ----------
@@ -279,7 +359,7 @@ export default function ChatbotEnhanced() {
     return (
       <button
         onClick={() => setMinimized(false)}
-        aria-label="Abrir chat"
+        aria-label="Abrir chat de apoyo emocional"
         style={{
           position: "fixed",
           bottom: "20px",
@@ -293,8 +373,11 @@ export default function ChatbotEnhanced() {
           boxShadow: "0 4px 15px rgba(0, 0, 0, 0.2)",
           cursor: "pointer",
           fontSize: "24px",
-          zIndex: 1000
+          zIndex: 1000,
+          transition: "transform 200ms",
         }}
+        onMouseOver={(e) => (e.target.style.transform = "scale(1.1)")}
+        onMouseOut={(e) => (e.target.style.transform = "scale(1)")}
       >
         💬
       </button>
@@ -309,34 +392,38 @@ export default function ChatbotEnhanced() {
         position: "fixed",
         bottom: "20px",
         right: "20px",
-        width: "360px",
-        height: "560px",
-        border: "1px solid #ccc",
-        borderRadius: "15px",
+        width: "380px",
+        height: "580px",
+        borderRadius: "20px",
         display: "flex",
         flexDirection: "column",
-        background: dark ? "#0f1724" : "white",
-        color: dark ? "#e6eef8" : "#111",
-        boxShadow: "0 6px 30px rgba(0, 0, 0, 0.2)",
+        background: dark ? "#1a1a2e" : "#ffffff",
+        color: dark ? "#e6e6fa" : "#1a1a2e",
+        boxShadow: "0 8px 32px rgba(0, 0, 0, 0.2)",
         zIndex: 1000,
-        fontFamily: "'Segoe UI', Tahoma, Geneva, Verdana, sans-serif",
-        overflow: "hidden"
+        fontFamily: "'Inter', -apple-system, BlinkMacSystemFont, sans-serif",
+        overflow: "hidden",
+        transition: "all 200ms",
       }}
     >
       {/* Header */}
-      <div style={{
-        background: "linear-gradient(135deg, #6a11cb 0%, #2575fc 100%)",
-        color: "white",
-        padding: "12px 15px",
-        borderRadius: "15px 15px 0 0",
-        display: "flex",
-        justifyContent: "space-between",
-        alignItems: "center"
-      }}>
-        <div style={{ fontWeight: "700", fontSize: "16px" }}>Apoyo Emocional ITSMIGRA</div>
-        <div style={{ display: "flex", gap: "8px", alignItems: "center" }}>
+      <div
+        style={{
+          background: "linear-gradient(135deg, #6a11cb 0%, #2575fc 100%)",
+          color: "white",
+          padding: "14px 18px",
+          borderRadius: "20px 20px 0 0",
+          display: "flex",
+          justifyContent: "space-between",
+          alignItems: "center",
+        }}
+      >
+        <div style={{ fontWeight: "600", fontSize: "16px" }}>
+          Apoyo Emocional ITSMIGRA
+        </div>
+        <div style={{ display: "flex", gap: "10px", alignItems: "center" }}>
           <button
-            onClick={() => setDark(d => !d)}
+            onClick={() => setDark((d) => !d)}
             aria-label="Alternar modo oscuro"
             title="Modo oscuro"
             style={{
@@ -344,69 +431,105 @@ export default function ChatbotEnhanced() {
               border: "none",
               color: "white",
               cursor: "pointer",
-              fontSize: "16px"
+              fontSize: "18px",
+              transition: "transform 200ms",
             }}
+            onMouseOver={(e) => (e.target.style.transform = "scale(1.2)")}
+            onMouseOut={(e) => (e.target.style.transform = "scale(1)")}
           >
-            {dark ? "🌙" : "☀️"}
+            {dark ? "🌞" : "🌙"}
           </button>
           <button
             onClick={() => setMinimized(true)}
             aria-label="Minimizar chat"
-            style={{ background: "transparent", border: "none", color: "white", cursor: "pointer", fontSize: "16px" }}
+            style={{
+              background: "transparent",
+              border: "none",
+              color: "white",
+              cursor: "pointer",
+              fontSize: "18px",
+              transition: "transform 200ms",
+            }}
+            onMouseOver={(e) => (e.target.style.transform = "scale(1.2)")}
+            onMouseOut={(e) => (e.target.style.transform = "scale(1)")}
           >
-            _
+            🗕
           </button>
         </div>
       </div>
 
       {/* Messages area */}
-      <div style={{
-        flex: 1,
-        overflowY: "auto",
-        padding: "14px",
-        background: dark ? "#071028" : "#f9f9f9",
-        transition: "background 200ms"
-      }}>
+      <div
+        style={{
+          flex: 1,
+          overflowY: "auto",
+          padding: "16px",
+          background: dark ? "#16213e" : "#f8fafc",
+          transition: "background 200ms",
+        }}
+      >
         {messages.map((m, i) => (
-          <div key={m.id || i} style={{
-            display: "flex",
-            justifyContent: m.sender === "user" ? "flex-end" : "flex-start",
-            marginBottom: "12px",
-            alignItems: "flex-end"
-          }}>
-            <div style={{
-              background: m.sender === "user" ? "linear-gradient(135deg, #6a11cb 0%, #2575fc 100%)" : (dark ? "#08223f" : "#e8f0fe"),
-              color: m.sender === "user" ? "white" : (dark ? "#dbeafe" : "#111"),
-              padding: "10px 14px",
-              borderRadius: m.sender === "user" ? "15px 5px 15px 15px" : "5px 15px 15px 15px",
-              maxWidth: "80%",
-              boxShadow: "0 2px 6px rgba(0,0,0,0.08)",
-              lineHeight: "1.4",
-              transition: "transform 200ms, opacity 200ms",
-              transform: "translateY(0)",
-              opacity: 1
-            }}>
-              {/* Si el mensaje viene con typing: mostrar indicador */}
+          <div
+            key={m.id || i}
+            style={{
+              display: "flex",
+              justifyContent: m.sender === "user" ? "flex-end" : "flex-start",
+              marginBottom: "12px",
+              alignItems: "flex-end",
+              animation: "fadeIn 300ms ease-in",
+            }}
+          >
+            <div
+              style={{
+                background:
+                  m.sender === "user"
+                    ? "linear-gradient(135deg, #6a11cb 0%, #2575fc 100%)"
+                    : dark
+                    ? "#2a2a4e"
+                    : "#e9ecef",
+                color: m.sender === "user" ? "white" : dark ? "#e6e6fa" : "#1a1a2e",
+                padding: "12px 16px",
+                borderRadius:
+                  m.sender === "user"
+                    ? "18px 4px 18px 18px"
+                    : "4px 18px 18px 18px",
+                maxWidth: "75%",
+                boxShadow: "0 2px 8px rgba(0,0,0,0.1)",
+                lineHeight: "1.5",
+                fontSize: "14px",
+              }}
+            >
               {m.typing ? (
-                <span aria-live="polite">Escribiendo<span style={{opacity:0.7}}>•••</span></span>
+                <span aria-live="polite">
+                  Escribiendo<span style={{ opacity: 0.7 }}>•••</span>
+                </span>
               ) : (
                 <div dangerouslySetInnerHTML={{ __html: linkify(m.text) }} />
               )}
 
-              {/* Si el bot adjuntó opciones en 'meta' */}
               {m.sender === "bot" && m.meta?.options?.length > 0 && (
-                <div style={{ display: "flex", gap: "6px", marginTop: "8px", flexWrap: "wrap" }}>
+                <div style={{ display: "flex", gap: "8px", marginTop: "10px", flexWrap: "wrap" }}>
                   {m.meta.options.map((opt, idx) => (
                     <button
                       key={idx}
-                      onClick={() => handleBotSuggestion(opt)}
+                      onClick={() => handleOptionClick(opt)}
                       style={{
-                        padding: "6px 10px",
-                        borderRadius: "14px",
-                        border: "1px solid rgba(0,0,0,0.08)",
-                        background: "transparent",
+                        padding: "6px 12px",
+                        borderRadius: "16px",
+                        border: `1px solid ${dark ? "#6a11cb" : "#2575fc"}`,
+                        background: m.meta.emergency ? "#ff6b6b" : "transparent",
+                        color: m.meta.emergency ? "white" : (dark ? "#6a11cb" : "#2575fc"),
                         cursor: "pointer",
-                        fontSize: "13px"
+                        fontSize: "12px",
+                        transition: "all 200ms",
+                      }}
+                      onMouseOver={(e) => {
+                        e.target.style.background = dark ? "#6a11cb" : "#2575fc";
+                        e.target.style.color = "white";
+                      }}
+                      onMouseOut={(e) => {
+                        e.target.style.background = m.meta.emergency ? "#ff6b6b" : "transparent";
+                        e.target.style.color = m.meta.emergency ? "white" : (dark ? "#6a11cb" : "#2575fc");
                       }}
                     >
                       {opt}
@@ -417,35 +540,41 @@ export default function ChatbotEnhanced() {
             </div>
           </div>
         ))}
-
-        {/* espacio para hacer scroll */}
         <div ref={bottomRef} />
       </div>
 
-      {/* Quick options area (cuando showOptions true) */}
+      {/* Quick options area */}
       {showOptions && (
-        <div style={{ padding: "10px 12px", borderTop: "1px solid #eee", background: dark ? "#04121e" : "white" }}>
+        <div
+          style={{
+            padding: "12px",
+            borderTop: `1px solid ${dark ? "#2a2a4e" : "#e2e8f0"}`,
+            background: dark ? "#1a1a2e" : "#ffffff",
+          }}
+        >
           <div style={{ display: "flex", gap: "8px", flexWrap: "wrap" }}>
-            {[
-              "Estrés académico",
-              "Ansiedad",
-              "Tristeza",
-              "Agendar cita"
-            ].map((option, index) => (
+            {["Ansiedad", "Estrés", "Depresión", "Crisis", "Agendar cita"].map((option, index) => (
               <button
                 key={index}
-                onClick={() => handleOptionClick(index)}
+                onClick={() => handleOptionClick(option)}
                 style={{
-                  padding: "8px 12px",
+                  padding: "8px 14px",
                   borderRadius: "18px",
-                  border: "1px solid #6a11cb",
+                  border: `1px solid ${dark ? "#6a11cb" : "#2575fc"}`,
                   background: "transparent",
-                  color: "#6a11cb",
+                  color: dark ? "#6a11cb" : "#2575fc",
                   fontSize: "13px",
-                  cursor: "pointer"
+                  cursor: "pointer",
+                  transition: "all 200ms",
                 }}
-                onMouseOver={(e) => { e.target.style.background = "#6a11cb"; e.target.style.color = "white"; }}
-                onMouseOut={(e) => { e.target.style.background = "transparent"; e.target.style.color = "#6a11cb"; }}
+                onMouseOver={(e) => {
+                  e.target.style.background = dark ? "#6a11cb" : "#2575fc";
+                  e.target.style.color = "white";
+                }}
+                onMouseOut={(e) => {
+                  e.target.style.background = "transparent";
+                  e.target.style.color = dark ? "#6a11cb" : "#2575fc";
+                }}
               >
                 {option}
               </button>
@@ -455,14 +584,16 @@ export default function ChatbotEnhanced() {
       )}
 
       {/* Input area */}
-      <div style={{
-        display: "flex",
-        padding: "12px",
-        borderTop: "1px solid #eee",
-        background: dark ? "#061226" : "#fff",
-        alignItems: "center",
-        gap: "8px"
-      }}>
+      <div
+        style={{
+          display: "flex",
+          padding: "12px",
+          borderTop: `1px solid ${dark ? "#2a2a4e" : "#e2e8f0"}`,
+          background: dark ? "#1a1a2e" : "#ffffff",
+          alignItems: "center",
+          gap: "10px",
+        }}
+      >
         <button
           onClick={toggleListening}
           aria-pressed={listening}
@@ -470,11 +601,12 @@ export default function ChatbotEnhanced() {
           style={{
             border: "none",
             background: listening ? "#ff6b6b" : "transparent",
-            color: listening ? "white" : (dark ? "#cde8ff" : "#6a11cb"),
+            color: listening ? "white" : dark ? "#6a11cb" : "#2575fc",
             padding: "8px",
             borderRadius: "50%",
             cursor: "pointer",
-            fontSize: "16px"
+            fontSize: "18px",
+            transition: "all 200ms",
           }}
         >
           {listening ? "●" : "🎤"}
@@ -487,13 +619,14 @@ export default function ChatbotEnhanced() {
           aria-label="Escribe tu mensaje"
           style={{
             flex: 1,
-            padding: "10px 14px",
-            borderRadius: "22px",
-            border: "1px solid #ddd",
+            padding: "12px 16px",
+            borderRadius: "24px",
+            border: `1px solid ${dark ? "#2a2a4e" : "#e2e8f0"}`,
             outline: "none",
             fontSize: "14px",
-            background: dark ? "#071a2a" : "white",
-            color: dark ? "#e6eef8" : "#111"
+            background: dark ? "#2a2a4e" : "#ffffff",
+            color: dark ? "#e6e6fa" : "#1a1a2e",
+            transition: "all 200ms",
           }}
           onKeyDown={(e) => e.key === "Enter" && sendMessage()}
         />
@@ -502,18 +635,49 @@ export default function ChatbotEnhanced() {
           onClick={() => sendMessage()}
           aria-label="Enviar mensaje"
           style={{
-            padding: "10px 14px",
+            padding: "12px",
             borderRadius: "50%",
             background: "linear-gradient(135deg, #6a11cb 0%, #2575fc 100%)",
             color: "white",
             border: "none",
             cursor: "pointer",
-            fontSize: "16px"
+            fontSize: "18px",
+            transition: "transform 200ms",
           }}
+          onMouseOver={(e) => (e.target.style.transform = "scale(1.1)")}
+          onMouseOut={(e) => (e.target.style.transform = "scale(1)")}
         >
           ➤
         </button>
       </div>
+
+      {/* Footer con mensaje positivo */}
+      <div
+        style={{
+          padding: "8px 16px",
+          fontSize: "12px",
+          color: dark ? "#a3bffa" : "#64748b",
+          textAlign: "center",
+          background: dark ? "#1a1a2e" : "#f8fafc",
+          borderTop: `1px solid ${dark ? "#2a2a4e" : "#e2e8f0"}`,
+        }}
+      >
+        Recuerda que no estás solo/a. Estoy aquí para apoyarte y puedes pedir ayuda profesional en cualquier momento. ❤️
+      </div>
     </div>
   );
+}
+
+// CSS para animación
+const styles = `
+@keyframes fadeIn {
+  from { opacity: 0; transform: translateY(10px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+`;
+
+if (typeof document !== "undefined") {
+  const styleSheet = document.createElement("style");
+  styleSheet.innerText = styles;
+  document.head.appendChild(styleSheet);
 }

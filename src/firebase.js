@@ -17,3 +17,7 @@ const firebaseConfig = {
 const app = initializeApp(firebaseConfig);
 export const auth = getAuth(app);
 export const db = getFirestore(app);
+
+
+//https://console.firebase.google.com/project/citas-22836/firestore/databases/-default-/data/~2Fmessages~2F11b3eetHnozyF5Xk9PQn?hl=es-419
+//https://console.firebase.google.com/project/citas-fc4e4/firestore/databases/-default-/data/~2Fmessages~2F11b3eetHnozyF5Xk9PQn?hl=es-419
